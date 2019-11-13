@@ -1,0 +1,286 @@
+---
+title: "GWAS Tutorial"
+output: pdf_document
+---
+
+TODO: install packages in binder file
+TODO: also uses dyplr, tibble
+TODO: maybe improve readability of sample filtering 1
+
+## Introduction
+
+This workshop was derived from Reed et al.'s tutorial, available here: https://onlinelibrary.wiley.com/doi/full/10.1002/sim.6605. It is intended to give you some hands-on experience performing some of the analyses we've been discussing in class. This notebook has been set up will all of the neccessary software and R packages for running the workshop.[Something about running this on your own] 
+
+[Summary of what we're doing today]
+
+[Explanation of file types]
+
+[Explanation of programs needed]
+
+## Setup
+
+To get started, 
+```{r setup, cache=TRUE}
+# setting our data and output 
+data.dir <- "../data"
+out.dir <- "../results"
+
+gwas_files <- 
+gwas.fn <- lapply(c(bed='bed',bim='bim',fam='fam',gds='gds'), function(n) sprintf("%s/GWAStutorial.%s", data.dir, n))
+clinical.fn <- sprintf("%s/GWAStutorial_clinical.csv", data.dir) 
+onethou.fn <- lapply(c(info='info',ped='ped'), function(n) sprintf("%s/chr16_1000g_CEU.%s", data.dir, n))
+protein.coding.coords.fname <- sprintf("%s/ProCodgene_coords.csv", data.dir)
+
+gwaa.fname <- sprintf("%s/GWAStutorialout.txt", out.dir)
+gwaa.unadj.fname <- sprintf("%s/GWAStutorialoutUnadj.txt", out.dir)
+impute.out.fname <- sprintf("%s/GWAStutorial_imputationOut.csv", out.dir)
+CETP.fname <- sprintf("%s/CETP_GWASout.csv", out.dir)
+```
+
+## Reading in the data
+
+Now that we have our environment set up, we can start by reading in the data we will be using today. As described above, the data we're using is formatted for use with PLINK, so we'll use the function read.plink from the snpStats package to read out data in to R. This function will return a list with three elements: genotypes (the genotype data as an object of type SnpMatrix), fam (a dataframe corresponding to the .fam file), and map (a dataframe corresponding to the .bim file). We've explored these different datasets a bit for you below so you can get a sense of what they look like.
+
+```{r genotype data reading, cache = TRUE}
+genotype_data <- read.plink("../data/GWAStutorial.bed", "../data/GWAStutorial.bim", "../data/GWAStutorial.fam", na.strings = ("-9"))
+summary(genotype_data)
+head(genotype_data$fam)
+head(genotype_data$map)
+```
+
+We also want to read in the clinical data for the individuals in our study, which is stored in a csv. It has seven columns, which are the sample ID for that individual (also called the family ID or the FamID), CAD status (coded as 0 for control and 1 for affected), sex (coded as 1 for male and 2 for female), age in years, triglyceride level (mg/dL), high-density lipoprotein level (mg/dL), and low-density lipoprotein level (mg/dL). To read this data in we'll use the read.csv function, and we'll specify what data types we want each row to be, as well as re-naming the rows to match the fam dataframe. 
+
+```{r clinical data reading, cache = TRUE}
+clinical_data <- read.csv("../data/GWAStutorial_clinical.csv", colClasses=c("character", "factor", "factor", rep("numeric", 4)))
+rownames(clinical_data) <- clinical_data$FamID
+head(clinical_data)
+```
+
+## Data pre-processing
+
+Now that we have the data ready, we can move on to the first step in running our GWAS: data pre-processing. We'll be doing two levels of data pre-processing today - SNP and sample pre-processing. We'll start with the SNP-level filtering.
+
+### SNP-level filtering
+
+Before we run any of our analyses, we want to filter out SNPs that should not be included in the analysis. This generally means removing SNPs that have a large amount of missing data, low variability, and genotyping errors. We'll start by filtering based on missing data and low variability, then move to sample filtering, and then return to SNP filtering to remove SNPs with possible genotyping errors. We'll filter in this order because sample relatedness and substructure can influence the Hardy-Weinberg equilibrium criteria we will use for filtering SNPs with possible genotyping errors, and we'll filter for those in our sample filtering.
+
+Missing data filter: Generally the metric used for this filtering step is the call rate for each SNP. The call rate for a SNP is defined as the proportion of individuals in the study for which the corresponding SNP information is not missing. Here, we will filter based on a call rate of 95% (e.g. we will filter out any SNPs whose genotyping call is missing in more than 5% of samples).
+
+Low variability filter: The metric we'll use for this filtering step is the minor allele frequency (MAF) for each SNP. SNPs with very low MAF are largely homogenous across our study population, which leads to low/inadequate power to detect a significant relationship between the SNP and our trait of interest. Here, we will remove SNPs that have MAF less than 1%.
+
+To do this filtering we'll be using the col.summary function from snpStats, which returns statistics for each SNP when applied to our genotyping data.
+
+```{r SNP filtering 1}
+snp_summary <- col.summary(genotype_data$genotypes)
+head(snp_summary)
+```
+
+Using the summary statistics we just computed (namely Call.rate and MAF), we can now apply the filters we discussed above.
+
+```{r SNP filtering 2}
+snp_call_rate_threshold <- 0.95
+maf_threshold <- 0.01
+
+# Filter on MAF and call rate
+keep_SNPs <- snp_summary %>% 
+  rownames_to_column('rsID') %>%
+  filter(!is.na(MAF), MAF > maf_threshold) %>% 
+  filter(Call.rate >= snp_call_rate_threshold) %>%
+  column_to_rownames('rsID')
+
+# convert our dataframe of SNPs to keep to a logical vector with TRUE if a SNP should be kept and FALSE if not
+keep_SNPs_logical <- rownames(snp_summary) %in% rownames(keep_SNPs)
+
+# we can check how many SNPs we're removing with these filters
+sum(!keep_SNPs_logical)
+
+# now we'll subset our genotype and SNP summary data to only keep the SNPs that passed our filters
+genotype_data$genotypes <- genotype_data$genotypes[,keep_SNPs_logical]
+snp_summary <- snp_summary[keep_SNPs_logical,]
+```
+
+## Sample-level filtering
+
+The next step in our data pre-processing is to filter samples. Some common filters are to remove samples based on missing data, sample contamination, correlation, and racial, ethnic, or gender ambiguity or discordance. We'll describe each of the filters we'll be using below.
+
+Missing data filter: Similar to the SNP-level filtering based on call rate that we did above, we'll also filter out individuals who are missing a large proportion of their genoytpe data across the typed SNPs. This proportion of missingness across SNPs is called the sample call rate, and we will use a threshold of 95% (e.g. we will filter out individuals who are missing genotype data for more than 5% of the typed SNPs)
+
+Heterozygosity filter: Under HWE, we expect heterozygous sites to occur with a proability $2p(1-p)$, where $p$ is the major allele frequency at that SNP. Excess heterozygosity across typed SNPs in an individual can be an indication of poor sample quality, while deficient heterozygosity can indicate inbreeding or other substructure. We will therefore remove individuals with an inbreeding coefficient $|F| = (1 - O/E) > 0.1$, where O and E are the observed and expected counts of heterozygous SNPs within an individual. 
+
+To do this filtering we'll be using the row.summary function from snpStats, which returns statistics for each sample when applied to our genotyping data.
+
+```{r sample filtering 1}
+sample_summary <- row.summary(genotype_data$genotypes)
+head(sample_summary)
+
+# compute the inbreeding coefficient as defined above and add it to our summary dataframe
+MAF <- snp_summary$MAF
+called_genotypes <- !is.na(genotype_data$genotypes)
+het_expectation <- called_genotypes %*% (2*MAF*(1-MAF))
+het_observation <- with(sample_summary,Heterozygosity*(ncol(genotype_data$genotypes))*Call.rate)
+sample_summary$inbreeding_coef <- 1-(het_observation/het_expectation)
+
+head(sample_summary)
+
+# filter on call rate and heterozygosity with the thresholds defined above
+sample_call_rate_threshold <- 0.95
+het_threshold <- 0.1
+
+keep_samples <- sample_summary %>%
+  rownames_to_column("sampleID") %>%
+  filter(!is.na(Call.rate),Call.rate > sample_call_rate_threshold) %>%
+  filter(abs(inbreeding_coef) <= het_threshold) %>%
+  column_to_rownames("sampleID")
+
+# convert our dataframe of samples to keep to a logical vector with TRUE if a sample should be kept and FALSE if not
+keep_samples_logical <- rownames(sample_summary) %in% rownames(keep_samples)
+
+# we can check how many samples we're removing with these filters
+sum(!keep_samples_logical)
+
+# since we don't remove any samples, we don't need to subset our genotype and clinical data. 
+```
+
+For this cohort, the above sample filters didn't remove any individuals.
+
+We'll also apply a couple other sample filters.
+
+Cryptic relatedness filter: Our later analysis steps assume that all of our individuals are independent, so it's important to remove any closely related individuals from our cohort. In regional cohort studies such as this, individuals from the same family can be recruited unintentionally. A common measure of relatedness between pairs of samples is based on identity by descent (IBD). An IBD kinship coefficient of greater than 0.10 may suggest relatedness, duplicates, or sample mixture. Typically, the individual of a related pair with lower genotype call rate is removed. 
+
+To apply this filter, we'll first perform linkage disequilibrium (LD) pruning using a threshold value of 0.2, which eliminates a large degree of redundancy in the data and reduces the influence of chromosomal artifacts. This dimension reduction step is commonly applied prior to both IBD analysis and PCA. 
+
+We'll perform the IBD analysis using the SNPRelated package, which requires data in a GDS format file. Our first step for this filter is therefore to set our LD and kinship thresholds and to generate the GDS files.
+
+```{r sample filtering 2}
+ld_threshold <- 0.2
+kinship_threshold <- 0.1
+
+snpgdsBED2GDS("../data/GWAStutorial.bed", "../data/GWAStutorial.fam", "../data/GWAStutorial.bim", "../data/GWAStutorial.gds")
+```
+
+```{r sample filtering 3}
+# we'll now clean up the GDS file a bit and prune our SNPs
+genotype_data_GDS <- snpgdsOpen("../data/GWAStutorial.gds", readonly=FALSE)
+
+# Automatically added "-1" sample suffixes are removed
+gds_ids <- read.gdsn(index.gdsn(genotype_data_GDS, "sample.id"))
+gds_ids <- sub("-1", "", gds_ids)
+add.gdsn(genotype_data_GDS, "sample.id", gds_ids, replace = TRUE)
+
+# Prune SNPs based on LD for IBD analysis
+set.seed(1000)
+genotype_sample_ids <- rownames(genotype_data$genotypes)
+snpSUB <- snpgdsLDpruning(genotype_data_GDS, ld.threshold = ld_threshold,
+                          sample.id = genotype_sample_ids, # Only analyze the filtered samples
+                          snp.id = colnames(genotype_data$genotypes)) # Only analyze the filtered SNPs
+
+pruned_SNPs <- unlist(snpSUB, use.names=FALSE)
+```
+
+We've now pruned our genotypes to only consider 72,812 SNPs. We can now estimate IBD in our samples using the snpgdsIBDMoM function, which returns (among other things) a table indicating kinship between pairs of samples.
+
+```{r sample filtering 4}
+ibd <- snpgdsIBDMoM(genotype_data_GDS, kinship=TRUE,
+                    sample.id = genotype_sample_ids,
+                    snp.id = pruned_SNPs,
+                    num.thread = 1)
+
+# pariwise sample comparison
+ibd_coeff <- snpgdsIBDSelection(ibd)
+head(ibd_coeff)
+```
+
+We're now ready to filter out samples based on IBD. Using the pairwise relatedness measure we just calculated, we will iteratively remove samples that are too similiar using a greedy strategy in which the sample with the largest number of related samples is removed. The process is repeated until there are no more pairs of samples with kinship coefficients above our cut-off.
+
+```{r sample filtering 5}
+# Check if there are any candidates for relatedness
+ibd_coeff <- ibd_coeff[ibd_coeff$kinship >= kinship_threshold, ]
+
+# iteratively remove samples with high kinship starting with the sample with the most pairings
+related_samples <- NULL
+while ( nrow(ibd_coeff) > 0 ) {
+
+    # count the number of occurrences of each and take the top one
+    sample_counts <- arrange(count(c(ibd_coeff$ID1, ibd_coeff$ID2)), -freq)
+    rm_sample <- sample_counts[1, 'x']
+    cat("Removing sample", as.character(rm_sample), 'too closely related to', sample_counts[1, 'freq'],'other samples.\n')
+
+    # remove from ibd_coeff and add to list
+    ibd_coeff <- ibd_coeff[ibd_coeff$ID1 != rm_sample & ibd_coeff$ID2 != rm_sample,]
+    related_samples <- c(as.character(rm_sample), related_samples)
+}
+
+# filter genotype and clinical data to include only unrelated samples
+genotype_data$genotypes <- genotype_data$genotypes[!(rownames(genotype_data$genotypes) %in% related_samples), ]
+clinical_data <- clinical_data[!(clinical_data$FamID %in% related_samples), ]
+
+genotype_sample_ids <- rownames(genotype_data$genotypes)
+
+length(related_samples)
+```
+
+In this example, none of the samples are filtered based on our IBD coefficent threshold.
+
+The next sample filter we're going to apply is based on ancestry. We filter on ancestry for two reasons. First, self-reported race and ethnicity can differe from clusters of individuals that are based solely on genetic information. Second, the presence of an individual not appearing to fall within a racial/ethnic cluster may be suggestive of a sample-level error.
+
+Ancestry filter: Here we'll use PCA to visualize ancestry groups. Note that we will use the subset of 72,812 SNPs after LD pruning as the input for the PCA. We'll plot the first two principal components of the genotype data, calcualted using the snpgdsPCA function from the SNPRelated package.
+
+```{r sample filtering 6}
+# Generate PCA matrix
+pca <- snpgdsPCA(genotype_data_GDS, sample.id = genotype_sample_ids,  snp.id = pruned_SNPs, num.thread=1)
+
+# Create data frame of first two principal comonents
+pc1_pc2 <- data.frame(sample.id = pca$sample.id,
+                    PC1 = pca$eigenvect[,1],    
+                    PC2 = pca$eigenvect[,2],    
+                    stringsAsFactors = FALSE)
+
+# Plot the first two principal comonents
+plot(pc1_pc2$PC2, pc1_pc2$PC1, xlab="Principal Component 2", ylab="Principal Component 1", main = "Ancestry Plot")
+```
+
+In this example we are reasonably confident that our samples are homogeneous, coming from European ancestry. Therefore, given that there are no clear outliers, we won't remove any samples.
+
+## Back to SNP-level filtering
+
+As discussed above, there are some SNP-level filters that should be applied after performing sample-level filtering. We'll apply those now.
+
+Hardy-Weinberg Equilibrium filter: Violations of HWE can be an indication of the presence of population substructure or the occurrence of a genotyping error. While they are not always distinguishable, it is a common practice to assume a genotyping error and remove SNPs for which HWE is violated. If case-control status is available, we limit this filtering to analysis of controls as a violation in cases may be an indication of association. Departures from HWE are generally measured at a given SNP using a chi-squared goodness-of-fit test between the observed and expected genotypes. We remove SNPs for which the HWE test statistic has a corresponding p-value of less than $1×10^{???6}$ in controls.
+
+```{r snp filtering 3}
+hwe_threshold <- 10^-6  
+
+# we'll only apply this filter to the control individuals 
+CAD_controls <- clinical_data[clinical_data$CAD==0, 'FamID' ]
+
+snp_summary_controls <- col.summary(genotype_data$genotypes[CAD_controls,])
+
+keep_SNPs_HWE <- snp_summary_controls %>% 
+  rownames_to_column("rsID") %>%
+  filter(!is.na(z.HWE)) %>% 
+  filter(abs(z.HWE) < abs(qnorm(hwe_threshold/2))) %>%
+  column_to_rownames("rsID")
+
+# convert our dataframe of SNPs to keep to a logical vector with TRUE if a SNP should be kept and FALSE if not
+keep_SNPs_HWE_logical <- rownames(snp_summary_controls) %in% rownames(keep_SNPs_HWE)
+
+# we can check how many SNPs we're removing with these filters
+sum(!keep_SNPs_HWE_logical)
+
+# now we should subset the genotype and SNP summary data to only include SNPs that passed the HWE filter
+genotype_data$genotypes <- genotype_data$genotypes[,keep_SNPs_HWE_logical]
+snp_summary <- snp_summary[keep_SNPs_HWE_logical,]
+```
+
+
+
+
+
+
+```{r cars}
+summary(cars)
+```
+
+```{r cars}
+summary(cars)
+```
