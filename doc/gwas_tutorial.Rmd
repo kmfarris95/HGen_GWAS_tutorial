@@ -17,26 +17,6 @@ This workshop was derived from Reed et al.'s tutorial, available here: https://o
 
 [Explanation of programs needed]
 
-## Setup
-
-To get started, 
-```{r setup, cache=TRUE}
-# setting our data and output 
-data.dir <- "../data"
-out.dir <- "../results"
-
-gwas_files <- 
-gwas.fn <- lapply(c(bed='bed',bim='bim',fam='fam',gds='gds'), function(n) sprintf("%s/GWAStutorial.%s", data.dir, n))
-clinical.fn <- sprintf("%s/GWAStutorial_clinical.csv", data.dir) 
-onethou.fn <- lapply(c(info='info',ped='ped'), function(n) sprintf("%s/chr16_1000g_CEU.%s", data.dir, n))
-protein.coding.coords.fname <- sprintf("%s/ProCodgene_coords.csv", data.dir)
-
-gwaa.fname <- sprintf("%s/GWAStutorialout.txt", out.dir)
-gwaa.unadj.fname <- sprintf("%s/GWAStutorialoutUnadj.txt", out.dir)
-impute.out.fname <- sprintf("%s/GWAStutorial_imputationOut.csv", out.dir)
-CETP.fname <- sprintf("%s/CETP_GWASout.csv", out.dir)
-```
-
 ## Reading in the data
 
 Now that we have our environment set up, we can start by reading in the data we will be using today. As described above, the data we're using is formatted for use with PLINK, so we'll use the function read.plink from the snpStats package to read out data in to R. This function will return a list with three elements: genotypes (the genotype data as an object of type SnpMatrix), fam (a dataframe corresponding to the .fam file), and map (a dataframe corresponding to the .bim file). We've explored these different datasets a bit for you below so you can get a sense of what they look like.
@@ -245,7 +225,7 @@ In this example we are reasonably confident that our samples are homogeneous, co
 
 As discussed above, there are some SNP-level filters that should be applied after performing sample-level filtering. We'll apply those now.
 
-Hardy-Weinberg Equilibrium filter: Violations of HWE can be an indication of the presence of population substructure or the occurrence of a genotyping error. While they are not always distinguishable, it is a common practice to assume a genotyping error and remove SNPs for which HWE is violated. If case-control status is available, we limit this filtering to analysis of controls as a violation in cases may be an indication of association. Departures from HWE are generally measured at a given SNP using a chi-squared goodness-of-fit test between the observed and expected genotypes. We remove SNPs for which the HWE test statistic has a corresponding p-value of less than $1�10^{???6}$ in controls.
+Hardy-Weinberg Equilibrium filter: Violations of HWE can be an indication of the presence of population substructure or the occurrence of a genotyping error. While they are not always distinguishable, it is a common practice to assume a genotyping error and remove SNPs for which HWE is violated. If case‐control status is available, we limit this filtering to analysis of controls as a violation in cases may be an indication of association. Departures from HWE are generally measured at a given SNP using a chi-squared goodness‐of‐fit test between the observed and expected genotypes. We remove SNPs for which the HWE test statistic has a corresponding p‐value of less than $1×10^{−6}$ in controls.
 
 ```{r snp filtering 3}
 hwe_threshold <- 10^-6  
