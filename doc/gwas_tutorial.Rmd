@@ -83,7 +83,7 @@ genotype_data$genotypes <- genotype_data$genotypes[,keep_SNPs_logical]
 snp_summary <- snp_summary[keep_SNPs_logical,]
 ```
 
-## Sample-level filtering
+### Sample-level filtering
 
 The next step in our data pre-processing is to filter samples. Some common filters are to remove samples based on missing data, sample contamination, correlation, and racial, ethnic, or gender ambiguity or discordance. We'll describe each of the filters we'll be using below.
 
@@ -225,7 +225,7 @@ plot(pc1_pc2$PC2, pc1_pc2$PC1, xlab="Principal Component 2", ylab="Principal Com
 
 In this example we are reasonably confident that our samples are homogeneous, coming from European ancestry. Therefore, given that there are no clear outliers, we won't remove any samples.
 
-## Back to SNP-level filtering
+### Back to SNP-level filtering
 
 As discussed above, there are some SNP-level filters that should be applied after performing sample-level filtering. We'll apply those now.
 
@@ -256,15 +256,400 @@ genotype_data$genotypes <- genotype_data$genotypes[,keep_SNPs_HWE_logical]
 snp_summary <- snp_summary[keep_SNPs_HWE_logical,]
 ```
 
+## Running the GWAS
 
+Now that we've loaded and filtered our genotyping data, we can move on to actually performing the GWAS. There are two important steps we still have to do before we get to the actual association step: perform PCA on our samples to generate PCs that will capture any remaining substructure in the dataset and impute our filtered genotypes so that we can test association on a more comprehensive set of SNPs.
 
+### PCA
 
+Even in a well-filtered and fairly homogenous dataset like the one we're working with here there can be unmeasured population stratification (also known as substructure) that could confound our analysis. To correct for this, we will perform PCA on our (LD-pruned) dataset and include the top 10 PCs as covariates in our later analysis. We will use the snpgdsPCA() function from the SNPRelate pacakge to do this. 
 
+```{r PCA}
+# first, we prune our SNPs using an LD threshold of 0.2
+ld_threshold <- 0.2
 
-```{r cars}
-summary(cars)
+set.seed(1000)
+genotype_sample_ids <- rownames(genotype_data$genotypes)
+snpSUB <- snpgdsLDpruning(genotype_data_GDS, ld.threshold = ld_threshold,
+                          sample.id = genotype_sample_ids, 
+                          snp.id = colnames(genotype_data$genotypes)) 
+
+pruned_SNPs_PCA <- unlist(snpSUB, use.names=FALSE)
+
+# now we'll run PCA on our pruned SNP set
+pca <- snpgdsPCA(genotype_data_GDS, sample.id = genotype_sample_ids,
+                 snp.id = pruned_SNPs_PCA, num.thread=1)
+
+# getting the first 10 PCs, where each column is a PC and each row is an individual
+top_PCs <- data.frame(FamID = pca$sample.id, pca$eigenvect[,1 : 10],
+                  stringsAsFactors = FALSE)
+colnames(top_PCs)[2:11]<-paste("pc", 1:10, sep = "")
+
+head(top_PCs)
+
+# Close GDS file
+closefn.gds(genotype_data_GDS)
 ```
 
-```{r cars}
-summary(cars)
+### Imputation
+
+The last step before we move on to association is to impute our SNPs. Genotyping arrays usually cature ~1 million SNPs, which we can leverage to impute many more variants that were not directly genotyped. We haven't discussed imputation extensively in this class (Stat Gen in the winter will discuss it in more depth), but a quick summary is that we can leverage known LD and haplotype structure to determine the genotype at nearby non-genotyped SNPs. Imputed genotypes can be reported as the ‘best guess’ genotype or as the posterior probability of each genotype at a given location on the genome. Importantly, the uncertainty in this estimation process needs to be accounted for in the association analysis, and thus, we distinguish between genotyped and imputed data henceforth. 
+
+After imputation, a quality control step is performed to filter imputed data with high degrees of uncertainty. We apply an $R^2$ threshold of 0.7 for inclusion in association analysis. $R^2$ is the value association with the linear model regressing each imputed SNP on regional typed SNPs. This is described further in the snpStats package documentation. Additionally, we exclude SNPs at this stage with a MAF, after assignment of the highest posterior probability genotype, of less than 0.01. For the purpose of illustration, we use the snp.imputation() and impute.snps() functions in the R package snpStats to impute a limited set of 1000 Genome SNPs on chromosome 16. In practice, imputation is performed across all chromosomes, resulting in up to 12.5 million typed and imputed SNPs on which association analysis can be performed.
+
+```{r imputation}
+# Read in 1000 Genomes data for chromosome 16
+chr16_1000genomes <- read.pedfile('../data/chr16_1000g_CEU.ped', 
+                                  snps = '../data/chr16_1000g_CEU.info', which=1)
+
+# Obtain genotype data for chromosome 16
+chr16_genotype_data <- chr16_1000genomes$genotypes
+
+# Obtain the chromosome position for each SNP
+chr16_pos <- chr16_1000genomes$map
+colnames(chr16_pos)<-c("SNP", "position", "A1", "A2")
+head(chr16_pos)
+
+# Subset for genotyped SNPs on chromosome 16
+genotyped_SNPs <- colnames(genotype_data$genotypes)
+genotyped_SNPs_chr16 <- genotype_data$map[genotype_data$map$snp.name %in% genotyped_SNPs & genotype_data$map$chr==16, ]
+target_SNPs <- genotyped_SNPs_chr16$snp.name
+
+# Subset 1000g data for our SNPs
+# "missing" and "present" are snpMatrix objects needed for imputation rules
+is.present <- colnames(chr16_genotype_data) %in% target_SNPs
+
+missing <- chr16_genotype_data[,!is.present]
+present <- chr16_genotype_data[,is.present] # our genotyped SNPs
+
+# Obtain positions of SNPs to be used for imputation rules
+pos_present <- chr16_pos$position[is.present]
+pos_missing <- chr16_pos$position[!is.present]
+
+# Calculate and store imputation rules using snp.imputation()
+rules <- snp.imputation(present, missing, pos_present, pos_missing)
+
+# Remove failed imputations
+rules <- rules[can.impute(rules)]
+
+# Now we want to filter based on imputation certainty and MAF
+# Set thresholds
+r2_threshold <- 0.7
+maf_threshold <- 0.01
+
+# Filter on imputation certainty and MAF
+rules <- rules[imputation.r2(rules) >= r2_threshold]
+rules <- rules[imputation.maf(rules) >= maf_threshold]
+
+# Obtain posterior expectation of genotypes of imputed snps
+target <- genotype_data$genotypes[,target_SNPs]
+imputed_SNPs <- impute.snps(rules, target, as.numeric=FALSE)
+print(imputed_SNPs)  # 162565 SNPs were imputed
 ```
+
+## Running our GWAS
+
+Now we get to actually running our GWAS. As is standard (but perhaps we should be suspicious of), we will be using an additive model for each SNP. We will also be using a Bonferonni‐corrected genome‐wide significance threshold of $5 x 10^{-8}$. This cutoff is based on research, suggesting approximately one‐million independent SNPs across the genome, so tends be applied regardless of the actual number of typed or imputed SNPs under investigation.
+
+In our data example, we use inverse normally transformed HDL‐cholesterol as our phenotype of interest, adjusting for age, sex, and the first 10 PCs. HDL‐cholesterol is a complex trait associated with cardiovascular disease, for which age and sex are established risk factors. Importantly, as in any model fitting procedure, it is essential to evaluate the appropriateness of model assumption and specifically the normality of the trait under study. Visual inspection of a histogram of HDL‐cholesterol reveals some extreme values, and therefore, an inverse normal transformation is selected. The following code prepares the phenotype data for analysis.
+
+```{r phenotype}
+# Merge clincal data and principal components to create phenotype table
+phenotype_data <- merge(clinical_data,top_PCs)
+
+# We will do a rank-based inverse normal transformation of hdl
+phenotype_data$phenotype <- rntransform(phenotype_data$hdl, family="gaussian")
+
+# Show that the assumptions of normality met after transformation
+par(mfrow=c(1,2))
+hist(phenotype_data$hdl, main="Histogram of HDL", xlab="HDL")
+hist(phenotype_data$phenotype, main="Histogram of Tranformed HDL", xlab="Transformed HDL")
+
+# Remove unnecessary columns from phenotype data
+phenotype_data$hdl <- NULL
+phenotype_data$ldl <- NULL
+phenotype_data$tg <- NULL
+phenotype_data$CAD <- NULL
+
+# Rename columns to match names necessary for GWAS() function
+phenotype_data <- rename(phenotype_data, id=FamID)
+
+# Include only subjects with hdl data
+phenotype_data<-phenotype_data[!is.na(phenotype_data$phenotype),]
+
+head(phenotype_data)
+```
+
+Now that our data is ready, we can perform the association analysis. We'll be doing that using the custom function you see below, although typically you would use a command line program such as PLINK.
+
+```{r GWAA}
+# Genome-wide Association Analysis
+# Parallel implementation of linear model fitting on each SNP
+
+GWAA <- function(genodata=genotypes,  phenodata=phenotypes, family = gaussian, filename=NULL,
+                 append=FALSE, workers=getOption("mc.cores",2L), flip=TRUE,
+                 select.snps=NULL, hosts=NULL, nSplits=10)
+{
+    if (!require(doParallel)) { stop("Missing doParallel package") }
+
+    #Check that a filename was specified
+    if(is.null(filename)) stop("Must specify a filename for output.")
+
+    #Check that the genotype data is of class 'SnpMatrix'
+    if( class(genodata)!="SnpMatrix") stop("Genotype data must of class 'SnpMatrix'.")
+
+    #Check that there is a variable named 'phenotype' in phenodata table
+    if( !"phenotype" %in% colnames(phenodata))  stop("Phenotype data must have column named 'phenotype'")
+
+    #Check that there is a variable named 'id' in phenodata table
+    if( !"id" %in% colnames(phenodata)) stop("Phenotype data must have column named 'id'.")
+
+    #If a vector of SNPs is given, subset genotype data for these SNPs
+    if(!is.null(select.snps)) genodata<-genodata[,which(colnames(genodata)%in%select.snps)]
+
+    #Check that there are still SNPs in 'SnpMatrix' object
+    if(ncol(genodata)==0) stop("There are no SNPs in the 'SnpMatrix' object.")
+
+    #Print the number of SNPs to be checked
+    cat(paste(ncol(genodata), " SNPs included in analysis.\n"))
+
+    #If append=FALSE than we will overwrite file with column names
+    if(!isTRUE(append)) {
+        columns<-c("SNP", "Estimate", "Std.Error", "t-value", "p-value")
+        write.table(t(columns), filename, row.names=FALSE, col.names=FALSE, quote=FALSE)
+    }
+
+    # Check sample counts
+    if (nrow(phenodata) != nrow(genodata)) {
+        warning("Number of samples mismatch.  Using subset found in phenodata.")
+    }
+
+    # Order genodata rows to be the same as phenodata
+    genodata <- genodata[phenodata$id,]
+
+    cat(nrow(genodata), "samples included in analysis.\n")
+
+    # Change which allele is counted (major or minor)
+    flip.matrix<-function(x) {
+        zero2 <- which(x==0)
+        two0 <- which(x==2)
+        x[zero2] <- 2
+        x[two0] <- 0
+        return(x)
+    }
+
+    nSNPs <- ncol(genodata)
+    genosplit <- ceiling(nSNPs/nSplits) # number of SNPs in each subset
+
+    snp.start <- seq(1, nSNPs, genosplit) # index of first SNP in group
+    snp.stop <- pmin(snp.start+genosplit-1, nSNPs) # index of last SNP in group
+
+    if (is.null(hosts)) {
+        # On Unix this will use fork and mclapply.  On Windows it
+        # will create multiple processes on localhost.
+        cl <- makeCluster(workers)
+    } else {
+        # The listed hosts must be accessible by the current user using
+        # password-less ssh with R installed on all hosts, all 
+        # packages installed, and "rscript" is in the default PATH.
+        # See docs for makeCluster() for more information.
+        cl <- makeCluster(hosts, "PSOCK")
+    }
+    show(cl)                            # report number of workers and type of parallel implementation
+    registerDoParallel(cl)
+
+    foreach (part=1:nSplits) %do% {
+        # Returns a standar matrix of the alleles encoded as 0, 1 or 2
+        genoNum <- as(genodata[,snp.start[part]:snp.stop[part]], "numeric")
+
+        # Flip the numeric values of genotypes to count minor allele
+        if (isTRUE(flip)) genoNum <- flip.matrix(genoNum)
+
+        # For each SNP, concatenate the genotype column to the
+        # phenodata and fit a generalized linear model
+        rsVec <- colnames(genoNum)
+        res <- foreach(snp.name=rsVec, .combine='rbind') %dopar% {
+            a <- summary(glm(phenotype~ . - id, family=family, data=cbind(phenodata, snp=genoNum[,snp.name])))
+            a$coefficients['snp',]
+        }
+
+        # write results so far to a file
+        write.table(cbind(rsVec,res), filename, append=TRUE, quote=FALSE, col.names=FALSE, row.names=FALSE)
+
+        cat(sprintf("GWAS SNPs %s-%s (%s%% finished)\n", snp.start[part], snp.stop[part], 100*part/nSplits))
+    }
+
+    stopCluster(cl)
+
+    return(print("Done."))
+}
+```
+
+The code below will run the genome-wide association analysis on our directly genotyped SNPs (we'll include the imputed SNPs in a minute). It takes a long time to run (~2 hours), so we have saved the results for you in the data folder.
+
+```{r running GWAA}
+start <- Sys.time()
+GWAA(genodata=genotype_data$genotypes, phenodata=phenotype_data, filename='../data/gwas_results.txt')
+end <- Sys.time()
+print(end-start)
+```
+
+We can now add some additional information to our GWAS output (-log10 p-value, chromosome, and position).
+
+```{r adding info}
+# Read in GWAS output that was produced by GWAA function
+gwas_results <- read.table('../gwas.results.txt', header=TRUE, colClasses=c("character", rep("numeric",4)))
+
+# Find the -log_10 of the p-values
+gwas_results$Neg_logP <- -log10(gwas_results$p.value)
+
+# Merge output with the map file by SNP name to add position and chromosome number
+gwas_results <- merge(gwas_results, genotype_data$map[,c("SNP", "chr", "position")])
+
+# Order SNPs by significance
+gwas_results <- arrange(gwas_results, -Neg_logP)
+head(gwas_results)
+
+gwas_results$type <- "typed"
+```
+
+There is one SNP (on chromosome 16) in our genotyped data that passes genome-wide signficance.
+
+Now we will consider the imputed SNPs. Several stand‐alone packages can be applied to conduct association analysis of imputed SNPs using the corresponding posterior probabilities. These include, for example, MACH2qtl/dat, ProbABEL, BEAGLE, BIMBAM, and SNPTEST. The R package snpStats also has functions to read in imputed data based on which imputation package was used (e.g., BEAGLE, IMPUTE, and MACH). For the purposes of this workshop, we use the single.rhs.tests() function in the packaged snpStats using the imputation rules generated above.
+
+```{r imputed GWAS}
+# Carry out association testing for imputed SNPs using snp.rhs.tests()
+rownames(phenotype_data) <- phenotype_data$id
+
+imputed_GWAS <- snp.rhs.tests(phenotype ~ sex + age + pc1 + pc2 + pc3 + pc4 + pc5 + pc6 + pc7 + pc8 + pc9 + pc10,
+                     family = "Gaussian", data = phenotype_data, snp.data = target, rules = rules)
+
+# Obtain p values for imputed SNPs by calling methods on the returned GlmTests object.
+results <- data.frame(SNP = imputed_GWAS$snp.names, p.value = p.value(imputed_GWAS), stringsAsFactors = FALSE)
+results <- results[!is.na(results$p.value),]
+
+# Merge imputation testing results with position information to obtain coordinates
+imputed_GWAS_final <-merge(results, chr16_pos[, c("SNP", "position")])
+imputed_GWAS_final$chr <- 16
+imputed_GWAS_final$type <- "imputed"
+
+# Find the -log_10 of the p-values
+imputed_GWAS_final$Neg_logP <- -log10(imputed_GWAS_final$p.value)
+
+# Order by p-value
+imputed_GWAS_final <- arrange(imputed_GWAS_final, p.value)
+head(imputed_GWAS_final)
+```
+
+There are two more SNPs from our imputed SNPs on chromosome 16 that pass genome-wide signifiance, which based on the position information seem like they may be in the same locus as our other significant SNP. In fact, the SNP with the lowest p-value in both the typed and imputed SNP analysis lies within the boundaries of the cholesteryl ester transfer protein gene, CETP.
+
+## Visualization and post-GWAS analysis
+
+We now have generated and fit both typed and imputed genotypes. The next step is to combine the results, and make some visualizations to better understand our results.
+
+```{r combining}
+# Combine typed and imputed SNPs
+gwas_results_all<-rbind.fill(gwas_results, imputed_GWAS_final)
+
+```
+
+The two most standard GWAS visualizations are manhattan plots (which is a useful visualization of the genome-wide results) and QQ plots (which are useful for quality control). Both are described in more detail below.
+
+Manhattan plots are used to visualize GWAS significance level by chromosome location. Each dot corresponds to a single SNP. The x‐axis represents gene coordinates, and the numbers shown correspond to chromosome numbers. The y‐axis is the negative of the log p‐value, so that large values correspond to small p‐values. The solid horizontal line indicates the Bonferonni corrected significance threshold (− log(5 × 10−8)). The dotted horizontal line is a less stringent suggestive association threshold (− log(5 × 10−6)). Visual inspection of this plot allows for identification of SNPs with relatively small p‐values that are in regions with relatively large and non‐significant p‐values, suggesting potential false positives.
+
+Here, we will call the GWAS_Manhattan function to plot −log10 of the p-value against SNP position across the entire set of typed and imputed SNPs. 
+
+```{r manhattan plot}
+# Plots Manhattan plot with significant SNPs highlighted.
+GWAS_Manhattan <- function(GWAS, col.snps=c("black","gray"),
+                           col.detected=c("black"), col.imputed=c("blue"), col.text="black",
+                           title="GWAS Tutorial Manhattan Plot", display.text=TRUE,
+                           bonferroni.alpha=0.05, bonferroni.adjustment=1000000,
+                           Lstringent.adjustment=10000) {
+
+    bonferroni.thresh <- -log10(bonferroni.alpha / bonferroni.adjustment)
+    Lstringent.thresh <- -log10(bonferroni.alpha / Lstringent.adjustment)
+    xscale <- 1000000
+
+    manhat <- GWAS[!grepl("[A-z]",GWAS$chr),]
+
+    #sort the data by chromosome and then location
+    manhat.ord <- manhat[order(as.numeric(manhat$chr),manhat$position),]
+    manhat.ord <- manhat.ord[!is.na(manhat.ord$position),]
+
+    ##Finding the maximum position for each chromosome
+    max.pos <- sapply(1:21, function(i) { max(manhat.ord$position[manhat.ord$chr==i],0) })
+    max.pos2 <- c(0, cumsum(max.pos))                  
+
+    #Add spacing between chromosomes
+    max.pos2 <- max.pos2 + c(0:21) * xscale * 10
+
+    #defining the positions of each snp in the plot
+    manhat.ord$pos <- manhat.ord$position + max.pos2[as.numeric(manhat.ord$chr)]
+
+    # alternate coloring of chromosomes
+    manhat.ord$col <- col.snps[1 + as.numeric(manhat.ord$chr) %% 2]
+
+    # draw the chromosome label roughly in the middle of each chromosome band
+    text.pos <- sapply(c(1:22), function(i) { mean(manhat.ord$pos[manhat.ord$chr==i]) })
+
+    # Plot the data
+    plot(manhat.ord$pos[manhat.ord$type=="typed"]/xscale, manhat.ord$Neg_logP[manhat.ord$type=="typed"],
+         pch=20, cex=.3, col= manhat.ord$col[manhat.ord$type=="typed"], xlab=NA,
+         ylab="Negative Log P-value", axes=F, ylim=c(0,max(manhat$Neg_logP)+1))
+    #Add x-label so that it is close to axis
+    mtext(side = 1, "Chromosome", line = 1.25)
+
+    points(manhat.ord$pos[manhat.ord$type=="imputed"]/xscale, manhat.ord$Neg_logP[manhat.ord$type=="imputed"],
+           pch=20, cex=.4, col = col.imputed)
+
+    points(manhat.ord$pos[manhat.ord$type=="typed"]/xscale, manhat.ord$Neg_logP[manhat.ord$type=="typed"],
+           pch=20, cex=.3, col = manhat.ord$col[manhat.ord$type=="typed"])
+
+    axis(2)
+    abline(h=0)
+
+    SigNifSNPs <- as.character(GWAS[GWAS$Neg_logP > Lstringent.thresh & GWAS$type=="typed", "SNP"])
+
+    #Add legend
+    legend("topright",c("Bonferroni corrected threshold (p = 5E-8)", "Candidate threshold (p = 5E-6)"),
+           border="black", col=c("gray60", "gray60"), pch=c(0, 0), lwd=c(1,1),
+           lty=c(1,2), pt.cex=c(0,0), bty="o", cex=0.6)
+
+    #Add chromosome number
+    text(text.pos/xscale, -.3, seq(1,22,by=1), xpd=TRUE, cex=.8)
+
+    #Add bonferroni line
+    abline(h=bonferroni.thresh, untf = FALSE, col = "gray60")
+
+    #Add "less stringent" line
+    abline(h=Lstringent.thresh, untf = FALSE, col = "gray60", lty = 2 )
+
+    #Plotting detected genes
+    #Were any genes detected?
+    if (length(SigNifSNPs)>0){
+
+        sig.snps <- manhat.ord[,'SNP'] %in% SigNifSNPs
+
+        points(manhat.ord$pos[sig.snps]/xscale,
+               manhat.ord$Neg_logP[sig.snps],
+             pch=20,col=col.detected, bg=col.detected,cex=0.5)
+
+      text(manhat.ord$pos[sig.snps]/xscale,
+           manhat.ord$Neg_logP[sig.snps],
+           as.character(manhat.ord[sig.snps,1]), col=col.text, offset=1, adj=-.1, cex=.5)
+    }
+}
+
+GWAS_Manhattan(gwas_results_all)
+```
+
+As we can see, there is a cluster of significant and suggestive SNPs on chromosome 16, as we would expect from our earlier investigation of the data. There are some other regions that have similar patterns (such as a region on chromosome 4), but at a lower significance, which may represent true associations that we are underpowered to detect here.
+
+The last visualization we'll consider here is a QQ plot. QQ plots are used to visualize the relationship between the expected and observed distributions of p-values. An inflation of p-values above the expected line is indicative of potentially uncorrected confounders (such as population structure) in your dataset.
+
+```{r qq plot}
+qq_plot <- estlambda(gwas_results$t.value^2,plot=TRUE,method="median")
+```
+
+We can see that with the exception of the significant hits, the expected and observed distributions are fairly similar, indicating that we have likely properly corrected for necessary confounders.
