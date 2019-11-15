@@ -497,14 +497,20 @@ print(end-start)
 We can now add some additional information to our GWAS output (-log10 p-value, chromosome, and position).
 
 ```{r adding info}
+# we're going to remove some files we made earlier and don't need anymore to clear up space
+rm(missing)
+rm(present)
+rm(genotype_data_GDS)
+
 # Read in GWAS output that was produced by GWAA function
-gwas_results <- read.table('../gwas.results.txt', header=TRUE, colClasses=c("character", rep("numeric",4)))
+gwas_results <- read.table('../data/gwas_results.txt', header=TRUE, colClasses=c("character", rep("numeric",4)))
 
 # Find the -log_10 of the p-values
 gwas_results$Neg_logP <- -log10(gwas_results$p.value)
 
 # Merge output with the map file by SNP name to add position and chromosome number
-gwas_results <- merge(gwas_results, genotype_data$map[,c("SNP", "chr", "position")])
+gwas_results <- merge(gwas_results, genotype_data$map[,c("snp.name", "chromosome", "position")],
+                      by.x="SNP",by.y="snp.name")
 
 # Order SNPs by significance
 gwas_results <- arrange(gwas_results, -Neg_logP)
@@ -525,7 +531,7 @@ imputed_GWAS <- snp.rhs.tests(phenotype ~ sex + age + pc1 + pc2 + pc3 + pc4 + pc
                      family = "Gaussian", data = phenotype_data, snp.data = target, rules = rules)
 
 # Obtain p values for imputed SNPs by calling methods on the returned GlmTests object.
-results <- data.frame(SNP = imputed_GWAS$snp.names, p.value = p.value(imputed_GWAS), stringsAsFactors = FALSE)
+results <- data.frame(SNP = imputed_GWAS@snp.names, p.value = p.value(imputed_GWAS), stringsAsFactors = FALSE)
 results <- results[!is.na(results$p.value),]
 
 # Merge imputation testing results with position information to obtain coordinates
@@ -549,15 +555,15 @@ We now have generated and fit both typed and imputed genotypes. The next step is
 
 ```{r combining}
 # Combine typed and imputed SNPs
+colnames(imputed_GWAS_final) <- c("SNP","p.value","position","chromosome","type","Neg_logP")
 gwas_results_all<-rbind.fill(gwas_results, imputed_GWAS_final)
-
 ```
 
 The two most standard GWAS visualizations are manhattan plots (which is a useful visualization of the genome-wide results) and QQ plots (which are useful for quality control). Both are described in more detail below.
 
 Manhattan plots are used to visualize GWAS significance level by chromosome location. Each dot corresponds to a single SNP. The x‐axis represents gene coordinates, and the numbers shown correspond to chromosome numbers. The y‐axis is the negative of the log p‐value, so that large values correspond to small p‐values. The solid horizontal line indicates the Bonferonni corrected significance threshold (− log(5 × 10−8)). The dotted horizontal line is a less stringent suggestive association threshold (− log(5 × 10−6)). Visual inspection of this plot allows for identification of SNPs with relatively small p‐values that are in regions with relatively large and non‐significant p‐values, suggesting potential false positives.
 
-Here, we will call the GWAS_Manhattan function to plot −log10 of the p-value against SNP position across the entire set of typed and imputed SNPs. 
+Here, we will call the GWAS_Manhattan function to plot −log10 of the p-value against SNP position across the entire set of typed and imputed SNPs. The imputed SNPs will be in blue and the genotyped SNPs in black. 
 
 ```{r manhattan plot}
 # Plots Manhattan plot with significant SNPs highlighted.
