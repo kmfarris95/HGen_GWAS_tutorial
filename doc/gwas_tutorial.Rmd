@@ -3,28 +3,29 @@ title: "GWAS Tutorial"
 output: pdf_document
 ---
 
-TODO: install packages in binder file
-TODO: also uses dyplr, tibble
-TODO: maybe improve readability of sample filtering 1
+```{r setting up}
+# loading the packages we will need later
+library(plyr)
+library(dplyr)
+library(tibble)
+library(snpStats)
+library(SNPRelate)
+library(downloader)
+library(remotes)
+library(GenABEL)
+```
 
 ## Introduction
 
-This workshop was derived from Reed et al.'s tutorial, available here: https://onlinelibrary.wiley.com/doi/full/10.1002/sim.6605. It is intended to give you some hands-on experience performing some of the analyses we've been discussing in class. This notebook has been set up will all of the neccessary software and R packages for running the workshop.[Something about running this on your own] 
+This workshop is a modified version of Reed et al.'s tutorial, available here: https://onlinelibrary.wiley.com/doi/full/10.1002/sim.6605. It is intended to give you some hands-on experience performing some of the analyses we've been discussing in class. This notebook has been set up will all of the necessary software and R packages for running the workshop. To run it locally, first run the "install.R" file in the binder folder, and then you should be ready to begin.
 
-[Summary of what we're doing today]
-
-[Explanation of file types]
-
-[Explanation of programs needed]
+Today we'll be using a publically available dataset to walk through the steps of running a GWAS, including pre-processing and post-analysis visualization. The dataset we'll be using is the PennCATH cohort data, which was collected with goal of performing a GWAS of coronary artery disease (CAD) and cardiovascular risk factors. The study includes 1,401 individuals with genotype information at ~850,000 SNPs, all of European ancestry. In addition to CAD status, it also includes several other phenotypes such as HDL cholesterol, LDL cholesterol, and triglycerides. Today we'll be focusing on the phenotype of HDL cholesterol.
 
 ## Reading in the data
 
 We will start by downloading the data we will be using today and reading it in. As described above, the data we're using is formatted for use with PLINK, so we'll use the function read.plink from the snpStats package to read out data in to R. This function will return a list with three elements: genotypes (the genotype data as an object of type SnpMatrix), fam (a dataframe corresponding to the .fam file), and map (a dataframe corresponding to the .bim file). We've explored these different datasets a bit for you below so you can get a sense of what they look like. 
 
 ```{r genotype data reading, cache = TRUE}
-#library(remotes)
-install_version("GenABEL",'1.7-6')
-
 download("https://www.mtholyoke.edu/courses/afoulkes/Data/GWAStutorial/GWASTutorial_Files.zip",
          destfile="../data/GWASTutorial_Files.zip")
 unzip("../data/GWASTutorial_Files.zip", exdir = "../data")
@@ -90,9 +91,9 @@ snp_summary <- snp_summary[keep_SNPs_logical,]
 
 The next step in our data pre-processing is to filter samples. Some common filters are to remove samples based on missing data, sample contamination, correlation, and racial, ethnic, or gender ambiguity or discordance. We'll describe each of the filters we'll be using below.
 
-Missing data filter: Similar to the SNP-level filtering based on call rate that we did above, we'll also filter out individuals who are missing a large proportion of their genoytpe data across the typed SNPs. This proportion of missingness across SNPs is called the sample call rate, and we will use a threshold of 95% (e.g. we will filter out individuals who are missing genotype data for more than 5% of the typed SNPs)
+Missing data filter: Similar to the SNP-level filtering based on call rate that we did above, we'll also filter out individuals who are missing a large proportion of their genotype data across the typed SNPs. This proportion of missingness across SNPs is called the sample call rate, and we will use a threshold of 95% (e.g. we will filter out individuals who are missing genotype data for more than 5% of the typed SNPs)
 
-Heterozygosity filter: Under HWE, we expect heterozygous sites to occur with a proability $2p(1-p)$, where $p$ is the major allele frequency at that SNP. Excess heterozygosity across typed SNPs in an individual can be an indication of poor sample quality, while deficient heterozygosity can indicate inbreeding or other substructure. We will therefore remove individuals with an inbreeding coefficient $|F| = (1 - O/E) > 0.1$, where O and E are the observed and expected counts of heterozygous SNPs within an individual. 
+Heterozygosity filter: Under HWE, we expect heterozygous sites to occur with a probability $2p(1-p)$, where $p$ is the major allele frequency at that SNP. Excess heterozygosity across typed SNPs in an individual can be an indication of poor sample quality, while deficient heterozygosity can indicate inbreeding or other substructure. We will therefore remove individuals with an inbreeding coefficient $|F| = (1 - O/E) > 0.1$, where O and E are the observed and expected counts of heterozygous SNPs within an individual. 
 
 To do this filtering we'll be using the row.summary function from snpStats, which returns statistics for each sample when applied to our genotyping data.
 
@@ -177,7 +178,7 @@ ibd_coeff <- snpgdsIBDSelection(ibd)
 head(ibd_coeff)
 ```
 
-We're now ready to filter out samples based on IBD. Using the pairwise relatedness measure we just calculated, we will iteratively remove samples that are too similiar using a greedy strategy in which the sample with the largest number of related samples is removed. The process is repeated until there are no more pairs of samples with kinship coefficients above our cut-off.
+We're now ready to filter out samples based on IBD. Using the pairwise relatedness measure we just calculated, we will iteratively remove samples that are too similar using a greedy strategy in which the sample with the largest number of related samples is removed. The process is repeated until there are no more pairs of samples with kinship coefficients above our cut-off.
 
 ```{r sample filtering 5}
 # Check if there are any candidates for relatedness
@@ -206,11 +207,11 @@ genotype_sample_ids <- rownames(genotype_data$genotypes)
 length(related_samples)
 ```
 
-In this example, none of the samples are filtered based on our IBD coefficent threshold.
+In this example, none of the samples are filtered based on our IBD coefficient  threshold.
 
-The next sample filter we're going to apply is based on ancestry. We filter on ancestry for two reasons. First, self-reported race and ethnicity can differe from clusters of individuals that are based solely on genetic information. Second, the presence of an individual not appearing to fall within a racial/ethnic cluster may be suggestive of a sample-level error.
+The next sample filter we're going to apply is based on ancestry. We filter on ancestry for two reasons. First, self-reported race and ethnicity can differ from clusters of individuals that are based solely on genetic information. Second, the presence of an individual not appearing to fall within a racial/ethnic cluster may be suggestive of a sample-level error.
 
-Ancestry filter: Here we'll use PCA to visualize ancestry groups. Note that we will use the subset of 72,812 SNPs after LD pruning as the input for the PCA. We'll plot the first two principal components of the genotype data, calcualted using the snpgdsPCA function from the SNPRelated package.
+Ancestry filter: Here we'll use PCA to visualize ancestry groups. Note that we will use the subset of 72,812 SNPs after LD pruning as the input for the PCA. We'll plot the first two principal components of the genotype data, calculated using the snpgdsPCA function from the SNPRelated package.
 
 ```{r sample filtering 6}
 # Generate PCA matrix
@@ -265,7 +266,7 @@ Now that we've loaded and filtered our genotyping data, we can move on to actual
 
 ### PCA
 
-Even in a well-filtered and fairly homogenous dataset like the one we're working with here there can be unmeasured population stratification (also known as substructure) that could confound our analysis. To correct for this, we will perform PCA on our (LD-pruned) dataset and include the top 10 PCs as covariates in our later analysis. We will use the snpgdsPCA() function from the SNPRelate pacakge to do this. 
+Even in a well-filtered and fairly homogenous dataset like the one we're working with here there can be unmeasured population stratification (also known as substructure) that could confound our analysis. To correct for this, we will perform PCA on our (LD-pruned) dataset and include the top 10 PCs as covariates in our later analysis. We will use the snpgdsPCA() function from the SNPRelate package to do this. 
 
 ```{r PCA}
 # first, we prune our SNPs using an LD threshold of 0.2
@@ -296,7 +297,7 @@ closefn.gds(genotype_data_GDS)
 
 ### Imputation
 
-The last step before we move on to association is to impute our SNPs. Genotyping arrays usually cature ~1 million SNPs, which we can leverage to impute many more variants that were not directly genotyped. We haven't discussed imputation extensively in this class (Stat Gen in the winter will discuss it in more depth), but a quick summary is that we can leverage known LD and haplotype structure to determine the genotype at nearby non-genotyped SNPs. Imputed genotypes can be reported as the ‘best guess’ genotype or as the posterior probability of each genotype at a given location on the genome. Importantly, the uncertainty in this estimation process needs to be accounted for in the association analysis, and thus, we distinguish between genotyped and imputed data henceforth. 
+The last step before we move on to association is to impute our SNPs. Genotyping arrays usually capture ~1 million SNPs, which we can leverage to impute many more variants that were not directly genotyped. We haven't discussed imputation extensively in this class (Stat Gen in the winter will discuss it in more depth), but a quick summary is that we can leverage known LD and haplotype structure to determine the genotype at nearby non-genotyped SNPs. Imputed genotypes can be reported as the ‘best guess’ genotype or as the posterior probability of each genotype at a given location on the genome. Importantly, the uncertainty in this estimation process needs to be accounted for in the association analysis, and thus, we distinguish between genotyped and imputed data henceforth. 
 
 After imputation, a quality control step is performed to filter imputed data with high degrees of uncertainty. We apply an $R^2$ threshold of 0.7 for inclusion in association analysis. $R^2$ is the value association with the linear model regressing each imputed SNP on regional typed SNPs. This is described further in the snpStats package documentation. Additionally, we exclude SNPs at this stage with a MAF, after assignment of the highest posterior probability genotype, of less than 0.01. For the purpose of illustration, we use the snp.imputation() and impute.snps() functions in the R package snpStats to impute a limited set of 1000 Genome SNPs on chromosome 16. In practice, imputation is performed across all chromosomes, resulting in up to 12.5 million typed and imputed SNPs on which association analysis can be performed.
 
@@ -500,7 +501,7 @@ print(end-start)
 We can now add some additional information to our GWAS output (-log10 p-value, chromosome, and position).
 
 ```{r adding info}
-# we're going to remove some files we made earlier and don't need anymore to clear up space
+# we're going to remove some files we made earlier and don't need any more to clear up space
 rm(missing)
 rm(present)
 rm(genotype_data_GDS)
@@ -522,7 +523,7 @@ head(gwas_results)
 gwas_results$type <- "typed"
 ```
 
-There is one SNP (on chromosome 16) in our genotyped data that passes genome-wide signficance.
+There is one SNP (on chromosome 16) in our genotyped data that passes genome-wide significance.
 
 Now we will consider the imputed SNPs. Several stand‐alone packages can be applied to conduct association analysis of imputed SNPs using the corresponding posterior probabilities. These include, for example, MACH2qtl/dat, ProbABEL, BEAGLE, BIMBAM, and SNPTEST. The R package snpStats also has functions to read in imputed data based on which imputation package was used (e.g., BEAGLE, IMPUTE, and MACH). For the purposes of this workshop, we use the single.rhs.tests() function in the packaged snpStats using the imputation rules generated above.
 
@@ -550,7 +551,7 @@ imputed_GWAS_final <- arrange(imputed_GWAS_final, p.value)
 head(imputed_GWAS_final)
 ```
 
-There are two more SNPs from our imputed SNPs on chromosome 16 that pass genome-wide signifiance, which based on the position information seem like they may be in the same locus as our other significant SNP. In fact, the SNP with the lowest p-value in both the typed and imputed SNP analysis lies within the boundaries of the cholesteryl ester transfer protein gene, CETP.
+There are two more SNPs from our imputed SNPs on chromosome 16 that pass genome-wide significance, which based on the position information seem like they may be in the same locus as our other significant SNP. In fact, the SNP with the lowest p-value in both the typed and imputed SNP analysis lies within the boundaries of the cholesteryl ester transfer protein gene, CETP.
 
 ## Visualization and post-GWAS analysis
 
@@ -562,7 +563,7 @@ colnames(imputed_GWAS_final) <- c("SNP","p.value","position","chromosome","type"
 gwas_results_all<-rbind.fill(gwas_results, imputed_GWAS_final)
 ```
 
-The two most standard GWAS visualizations are manhattan plots (which is a useful visualization of the genome-wide results) and QQ plots (which are useful for quality control). Both are described in more detail below.
+The two most standard GWAS visualizations are Manhattan plots (which is a useful visualization of the genome-wide results) and QQ plots (which are useful for quality control). Both are described in more detail below.
 
 Manhattan plots are used to visualize GWAS significance level by chromosome location. Each dot corresponds to a single SNP. The x‐axis represents gene coordinates, and the numbers shown correspond to chromosome numbers. The y‐axis is the negative of the log p‐value, so that large values correspond to small p‐values. The solid horizontal line indicates the Bonferonni corrected significance threshold (− log(5 × 10−8)). The dotted horizontal line is a less stringent suggestive association threshold (− log(5 × 10−6)). Visual inspection of this plot allows for identification of SNPs with relatively small p‐values that are in regions with relatively large and non‐significant p‐values, suggesting potential false positives.
 
