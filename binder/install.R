@@ -8,6 +8,3 @@ BiocManager::install("snpStats")
 BiocManager::install("SNPRelate")
 BiocManager::install("rtracklayer")
 BiocManager::install("biomaRt")
-
-library(remotes)
-install_version("GenABEL",'1.7-6')

@@ -22,6 +22,9 @@ This workshop was derived from Reed et al.'s tutorial, available here: https://o
 We will start by downloading the data we will be using today and reading it in. As described above, the data we're using is formatted for use with PLINK, so we'll use the function read.plink from the snpStats package to read out data in to R. This function will return a list with three elements: genotypes (the genotype data as an object of type SnpMatrix), fam (a dataframe corresponding to the .fam file), and map (a dataframe corresponding to the .bim file). We've explored these different datasets a bit for you below so you can get a sense of what they look like. 
 
 ```{r genotype data reading, cache = TRUE}
+#library(remotes)
+install_version("GenABEL",'1.7-6')
+
 download("https://www.mtholyoke.edu/courses/afoulkes/Data/GWAStutorial/GWASTutorial_Files.zip",
          destfile="../data/GWASTutorial_Files.zip")
 unzip("../data/GWASTutorial_Files.zip", exdir = "../data")
